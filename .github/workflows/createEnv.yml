@@ -1,0 +1,77 @@
+name: Generate and Upload .env Secrets
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  generate-envs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate .env files
+        run: |
+          root_env=".env"
+          root_env_example=".env.example"
+          turbo_json="turbo.json"
+          
+          # Borrar archivos anteriores
+          rm -f $root_env $root_env_example
+          touch $root_env $root_env_example
+
+          global_env_vars=() # Array para turbo.json
+
+          for app in apps/*/; do
+            app_name=$(basename "$app" | tr '[:lower:]' '[:upper:]')  # Convierte en mayúsculas
+            env_file="${app}.env"
+            env_example_file="${app}.env.example"
+
+            if [ -f "$env_file" ]; then
+              echo "Procesando $env_file..."
+              
+              # Borrar y regenerar el .env.example de la app
+              rm -f "$env_example_file"
+              touch "$env_example_file"
+
+              # Crear .env.example con foo y actualizar .env global
+              while IFS='=' read -r key value; do
+                if [[ ! -z "$key" ]]; then
+                  echo "$key=foo" >> "$env_example_file"
+                  global_key="${app_name}_${key}"
+                  echo "$global_key=$value" >> "$root_env"
+                  echo "$global_key=foo" >> "$root_env_example"
+                  global_env_vars+=("\"$global_key\"") # Agregar a turbo.json
+                fi
+              done < "$env_file"
+            fi
+          done
+
+          # Convertir array en formato JSON y actualizar turbo.json
+          global_env_json=$(IFS=,; echo "[${global_env_vars[*]}]")
+
+          if jq -e '.globalEnv' "$turbo_json" >/dev/null; then
+            # Si globalEnv existe, actualizarlo
+            jq --argjson envs "$global_env_json" '.globalEnv = $envs' "$turbo_json" > tmp.json && mv tmp.json "$turbo_json"
+          else
+            # Si globalEnv no existe, agregarlo
+            jq --argjson envs "$global_env_json" '. + {globalEnv: $envs}' "$turbo_json" > tmp.json && mv tmp.json "$turbo_json"
+          fi
+
+          echo "turbo.json actualizado:"
+          cat "$turbo_json"
+
+      - name: Upload .env global as GitHub Secret
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          secret_name="GLOBAL_ENV"
+          secret_value=$(cat .env | base64 -w0)
+          
+          curl -X PUT -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/secrets/$secret_name \
+            -d '{"encrypted_value":"'"$secret_value"'"}'
